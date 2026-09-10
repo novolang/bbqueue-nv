@@ -1,0 +1,80 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of its own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  For this package the
+// claim is the reason the package exists: the producer is an interrupt
+// handler on a microcontroller, and a queue that could not compile for
+// one would be a queue for something else.
+//
+// It BUILDS; it does not run.  Every function it calls is a `todo()`
+// today, so a device that executed this would panic on the first line
+// of `main`.  What is being checked is the tier: `--target=nrf52-qemu`
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks the module and refuses a list literal, a `Str`
+// concatenation, a `Bytes` call or an unbounded `while` wherever the
+// implementation later puts one.
+//
+// THERE IS ONE MODULE AND THE PROBE TAKES ALL OF IT.  Nothing here
+// touches `Bytes`, `Str` or `Result`, because the queue owns no bytes
+// and every function is total — which is what lets the whole public
+// surface be compiled for a device rather than a core subset of it.
+
+use bbqueue
+
+// The buffer the queue hands out indices into, the way firmware would
+// hold one: a fixed inline array inside a `@value` struct, on the stack
+// with no header and no allocation.  `[u8; 32]` is a true inline array
+// only inside a `@value` struct — outside one, the annotation still
+// means a list, and a list literal is a heap allocation the tier
+// refuses (SPEC § 14.4).
+@value
+struct ProbeBuf
+    b: [u8; 32]
+
+fn empty_buf() -> ProbeBuf
+    ProbeBuf { b: [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                   0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                   0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                   0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8] }
+
+fn main() [hw]
+    // Each step is bound with its type written out because a call into
+    // another module does not have its return type inferred in a
+    // single-file build.  Inside a package built as one unit — which is
+    // what every host suite does — none of these annotations is needed.
+    let buf = empty_buf()
+    var q: BbQueue = bbqueue.queue(32)
+
+    // The producer's half, which is what runs in the interrupt: ask,
+    // read the indices, commit.  The buffer read is what forces the
+    // index arithmetic to be compiled rather than folded away.
+    let w: BbGrant = bbqueue.grant(q, 8)
+    if w.len > 0
+        let first: u8 = buf.b[w.at]
+        q = bbqueue.commit(q, w, w.len)
+        hal.uart.write("bbqueue-nv: committed\n")
+
+    // The consumer's half, which is what runs in the main loop.
+    let r: BbGrant = bbqueue.read(q)
+    if r.len > 0
+        let first: u8 = buf.b[r.at]
+        q = bbqueue.release(q, r, r.len)
+        hal.uart.write("bbqueue-nv: released\n")
+
+    // And the wrap, which is the arithmetic worth compiling for a
+    // device because it is the part with a branch in it.
+    let big: BbGrant = bbqueue.grant_max(q)
+    let mark: Int = bbqueue.watermark(q)
+    if bbqueue.is_inverted(q)
+        // Two writes rather than one interpolation: `"…${x}"` is a heap
+        // concatenation, which the tier refuses.
+        hal.uart.write("bbqueue-nv: inverted at ")
+        hal.uart.write(str.from_int(mark))
+        hal.uart.write("\n")
+
+    hal.uart.write("bbqueue-nv: one grant, one commit, one release\n")

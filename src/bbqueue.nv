@@ -1,0 +1,257 @@
+// bbqueue — a single-producer single-consumer byte queue whose unit of
+// work is a CONTIGUOUS GRANT rather than a byte.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A GRANT IS.  The producer asks for N contiguous bytes, is told
+// where they are, writes them where they are, and then commits M of the
+// N.  The consumer is told where the readable bytes are, reads them
+// where they are, and releases K of them.  Nothing is copied into the
+// queue and nothing is copied out: the write IS the frame, and the
+// commit is what makes it visible.  That is the whole reason to prefer
+// this to push and pop, and the README argues it.
+//
+// THE WRAP IS A WATERMARK, NEVER A SPLIT GRANT.  A grant is contiguous
+// or it does not exist.  When the tail of the buffer is too small for
+// what the producer asked for, the grant is taken from the FRONT
+// instead and the watermark records where the written region ended — so
+// the consumer knows to stop there and wrap, and no caller ever has to
+// handle a frame in two pieces.  A frame in two pieces is exactly what
+// a ring buffer forces on an interrupt handler and exactly what this
+// does not.
+//
+// SANS-IO, AND THEREFORE BUFFERLESS.  The queue is index arithmetic and
+// nothing else: it owns no bytes, reads none and writes none.  The
+// buffer belongs to the caller, and a grant is a pair of indices into
+// it.  That is what lets one queue serve a `Bytes` on a host and a
+// static region on a device without knowing which it is — and it is
+// also the honest shape rather than the chosen one, because a `@value`
+// struct is built whole and replaced whole (SPEC § 14.3), so a queue
+// that owned its buffer would copy the whole buffer on every byte
+// written.  The README says what the language would need for the other
+// shape.
+//
+// NO LOCK, NO ATOMIC, NO EFFECT.  Every function here is a total
+// function from values to values, so there is nothing in this module to
+// protect.  What needs protecting is the CELL two contexts share the
+// queue value through, and that belongs to the caller; the README says
+// how the runtime's critical section meets it, and why the section is
+// around one field and not around the queue.
+
+// The queue between two operations: four indices and a flag, and no
+// bytes at all.
+//
+// A `@value` struct, so it lives in the caller's stack frame or its
+// static cell with no header, no reference count and no allocation.
+//
+// `write_at` is where the producer's next grant begins and `read_at` is
+// where the consumer's next one does.  `inverted` is true when the
+// producer has wrapped past the consumer — when the written region is
+// `read_at..watermark` followed by `0..write_at` rather than the single
+// run `read_at..write_at`.  `watermark` is where the written region
+// ended before that wrap, and is `cap` while the queue is not inverted.
+//
+// The flag is a field rather than a comparison of the two indices
+// because `write_at == read_at` is both "empty" and "full" and the
+// comparison cannot tell them apart.  One bit spent on saying which is
+// cheaper than any of the ways of avoiding it.
+pub @value
+struct BbQueue
+    cap: Int
+    write_at: Int
+    read_at: Int
+    watermark: Int
+    inverted: Bool
+
+// A run of contiguous bytes in the caller's buffer: where it starts,
+// and how many bytes are in it.
+//
+// `len` of 0 is "there is no room" for a write grant and "there is
+// nothing to read" for a read grant.  It is not a failure and there is
+// no error value: a producer that is ahead of its consumer is the
+// normal state of a log queue, and a caller that has to `match` on it
+// would write the same `if` either way.
+//
+// A grant is handed back to `commit` or `release` rather than only its
+// length, because the queue has to know WHERE the grant was: a grant
+// taken from the front of the buffer is the wrap, and the wrap is what
+// moves the watermark.
+pub @value
+struct BbGrant
+    at: Int
+    len: Int
+
+// A fresh queue over a caller's buffer of `cap` bytes.
+//
+// The buffer is not passed and not touched.  `cap` is the caller's
+// promise about the buffer it will pass to every read and write it
+// makes with this queue, and every index this module answers is inside
+// `0..cap`.
+//
+// ```novo
+// use bbqueue
+//
+// fn main() [io]
+//     let q = bbqueue.queue(256)
+//     println("${bbqueue.capacity(q)} ${bbqueue.len(q)}")   // 256 0
+// ```
+pub fn queue(cap: Int) -> BbQueue
+    todo("bbqueue.queue")
+
+// Ask for `want` contiguous bytes, and answer where they are.
+//
+// `len` is `want` when the request fits and 0 when it does not; a
+// partial grant is never given, because a caller that asked for a whole
+// frame's worth of room cannot use half of it.  `at` is meaningful only
+// when `len` is above 0.
+//
+// THE WRAP HAPPENS HERE.  When the tail of the buffer is too short but
+// the front is long enough, the grant is taken from the front — `at` is
+// 0 — and `commit` is what records the watermark.  The queue is
+// unchanged by this call: asking does not reserve, and a producer that
+// asks twice without committing gets the same answer twice.
+//
+// ```novo
+// use bbqueue
+//
+// fn main() [io]
+//     let q = bbqueue.queue(64)
+//     let g = bbqueue.grant(q, 8)
+//     println("${g.at} ${g.len}")   // 0 8
+// ```
+pub fn grant(q: BbQueue, want: Int) -> BbGrant
+    todo("bbqueue.grant")
+
+// The largest contiguous grant available, which may be 0.
+//
+// What a producer with a variable-length frame asks for: give me
+// whatever is there, and I will write what fits.  It is the same
+// arithmetic as `grant`, asked the other way round.
+//
+// ```novo
+// use bbqueue
+//
+// fn main() [io]
+//     let q = bbqueue.queue(64)
+//     println("${bbqueue.grant_max(q).len}")   // 64
+// ```
+pub fn grant_max(q: BbQueue) -> BbGrant
+    todo("bbqueue.grant_max")
+
+// Make the first `used` bytes of `g` visible to the consumer, and
+// answer the queue after it.
+//
+// `used` may be less than `g.len` — that is the point of the two-step:
+// a producer reserves what a frame might need and commits what it
+// turned out to be, and the difference is given back rather than
+// wasted.  `used` above `g.len` is a panic, exactly as `xs[i]` past the
+// end is: a caller that committed more than it asked for is a mistake
+// in the program, not a value the program should carry around.
+//
+// This is the ONLY function that moves `write_at`, `watermark` or
+// `inverted`, and `release` is the only one that moves `read_at`.  That
+// division is what makes the queue safe across an interrupt boundary
+// with one word of protection rather than a lock — see the README.
+//
+// ```novo
+// use bbqueue
+//
+// fn main() [io]
+//     var q = bbqueue.queue(64)
+//     let g = bbqueue.grant(q, 8)
+//     // ... the caller writes g.len bytes at g.at ...
+//     q = bbqueue.commit(q, g, 5)
+//     println("${bbqueue.len(q)}")   // 5
+// ```
+pub fn commit(q: BbQueue, g: BbGrant, used: Int) -> BbQueue
+    todo("bbqueue.commit")
+
+// The contiguous bytes waiting to be read, which may be none.
+//
+// `len` stops at the watermark when the queue is inverted, so a
+// consumer never sees a run that spans the wrap.  Two calls with a
+// `release` between them drain a wrapped queue in two grants, and that
+// is the only place the wrap is visible to a caller at all.
+//
+// ```novo
+// use bbqueue
+//
+// fn main() [io]
+//     var q = bbqueue.queue(64)
+//     let w = bbqueue.grant(q, 8)
+//     q = bbqueue.commit(q, w, 8)
+//     let r = bbqueue.read(q)
+//     println("${r.at} ${r.len}")   // 0 8
+// ```
+pub fn read(q: BbQueue) -> BbGrant
+    todo("bbqueue.read")
+
+// Give the first `used` bytes of `g` back to the producer, and answer
+// the queue after it.
+//
+// `used` may be less than `g.len`, so a consumer that drained one whole
+// frame out of a grant holding three releases one frame's worth and
+// comes back for the rest.  `used` above `g.len` is a panic, for the
+// reason `commit` gives.
+//
+// Releasing up to the watermark of an inverted queue is what clears the
+// inversion: `read_at` returns to 0, `watermark` returns to `cap`, and
+// the next `read` sees the run the producer wrote at the front.
+//
+// ```novo
+// use bbqueue
+//
+// fn main() [io]
+//     var q = bbqueue.queue(64)
+//     let w = bbqueue.grant(q, 8)
+//     q = bbqueue.commit(q, w, 8)
+//     let r = bbqueue.read(q)
+//     q = bbqueue.release(q, r, 8)
+//     println("${bbqueue.len(q)}")   // 0
+// ```
+pub fn release(q: BbQueue, g: BbGrant, used: Int) -> BbQueue
+    todo("bbqueue.release")
+
+// How many bytes are committed and not yet released, across the wrap.
+//
+// This is the queue's depth and not the length of the next read grant —
+// an inverted queue answers the sum of its two runs here and the length
+// of the first of them from `read`.  A caller watching for backpressure
+// wants this one; a caller about to read wants `read`.
+pub fn len(q: BbQueue) -> Int
+    todo("bbqueue.len")
+
+// The buffer size the queue was made for.
+pub fn capacity(q: BbQueue) -> Int
+    todo("bbqueue.capacity")
+
+// True when nothing is committed and unreleased.
+pub fn is_empty(q: BbQueue) -> Bool
+    todo("bbqueue.is_empty")
+
+// True when no grant of any size can be given.
+//
+// A queue can be full with bytes free: the free space is on the wrong
+// side of the wrap, or it is split, and a contiguous grant needs a
+// contiguous run.  That is the cost of the guarantee, and it is why
+// this is a function rather than `len(q) == capacity(q)`.
+pub fn is_full(q: BbQueue) -> Bool
+    todo("bbqueue.is_full")
+
+// Where the written region ends when the queue is inverted, and the
+// capacity when it is not.
+//
+// Published because a caller debugging a wrap needs to see it, and
+// because the field is the one part of this design a reader is most
+// likely to want to check against the reference implementation.
+pub fn watermark(q: BbQueue) -> Int
+    todo("bbqueue.watermark")
+
+// True when the producer has wrapped past the consumer.
+//
+// The state the watermark exists for.  A caller does not need to
+// consult it — `read` and `grant` already account for it — and it is
+// published for the same reason `watermark` is.
+pub fn is_inverted(q: BbQueue) -> Bool
+    todo("bbqueue.is_inverted")

@@ -1,0 +1,33 @@
+[package]
+name        = "bbqueue-nv"
+version     = "0.0.1"
+description = "A single-producer single-consumer byte queue whose unit of work is a contiguous grant: the producer is told where N bytes are, writes the frame in place, and commits what it turned out to be.  The wrap is a watermark, so no caller ever handles a frame in two pieces.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: index arithmetic over a buffer the caller owns.  Every
+# function is total, from values to values, so there is nothing here to
+# protect and no effect to declare — the lock the reference
+# implementation needs belongs to the cell the caller shares the queue
+# value through, not to this package.
+layer       = "core"
+
+category    = "embedded"
+
+tags        = ["bbqueue", "spsc", "queue", "grant", "ring", "defmt", "deferred-logging", "interrupt", "embedded", "sans-io"]
+repository  = "https://github.com/novolang/bbqueue-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+[docs.pages]
+"README.md" = "Handing an interrupt a place to write, rather than a byte to push"
+
+[dependencies]
+# None, and that is the property that makes the package useful: a queue
+# that owns no bytes needs nothing to own them with.

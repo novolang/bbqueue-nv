@@ -1,0 +1,216 @@
+// tests/bbqueue_tests.nv — the API tests, written against the
+// signatures.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// bbqueue.<fn>` from the `todo()` that is each body.  That is the
+// expected state of an interface release: the compiler has checked
+// every signature, every type and every effect row, and nothing else
+// has been checked because there is nothing else yet.
+//
+// The buffer is a real `Bytes` here, so that the tests read like a
+// caller rather than like index arithmetic: the queue answers where to
+// write, and the test writes there.  That is the whole contract, and
+// writing it out is the only way to check it.
+
+use std.test
+use std.bytes
+use bbqueue
+
+// Fill `used` bytes of `buf` at `at` with `fill`, the way a producer
+// with a frame in hand would.
+fn write_at(buf: Bytes, at: Int, used: Int, fill: Int) -> Bytes
+    var b = buf
+    for i in 0..used
+        b = bytes.set_u8(b, at + i, fill)
+    b
+
+@test
+fn test_a_fresh_queue_is_empty_and_grants_the_whole_buffer()
+    let q = bbqueue.queue(64)
+    test.assert_eq(bbqueue.capacity(q), 64)
+    test.assert_eq(bbqueue.len(q), 0)
+    test.assert_true(bbqueue.is_empty(q), "a fresh queue holds nothing")
+    test.assert_false(bbqueue.is_full(q), "a fresh queue is not full")
+    // Not inverted, so the watermark is the capacity.
+    test.assert_false(bbqueue.is_inverted(q), "a fresh queue has not wrapped")
+    test.assert_eq(bbqueue.watermark(q), 64)
+    // The whole buffer is one contiguous run.
+    test.assert_eq(bbqueue.grant_max(q).len, 64)
+
+@test
+fn test_asking_does_not_reserve()
+    // A grant is a query.  Two asks without a commit answer the same
+    // thing, which is what makes the queue value immutable in the
+    // useful sense rather than only in the language's sense.
+    let q = bbqueue.queue(64)
+    let a = bbqueue.grant(q, 8)
+    let b = bbqueue.grant(q, 8)
+    test.assert_eq(a.at, b.at)
+    test.assert_eq(a.len, b.len)
+    test.assert_eq(bbqueue.len(q), 0)
+
+@test
+fn test_a_grant_is_contiguous_or_it_is_nothing()
+    // 8 bytes of buffer, 9 asked for: no partial grant, because a
+    // caller that asked for a whole frame's worth cannot use half.
+    let q = bbqueue.queue(8)
+    test.assert_eq(bbqueue.grant(q, 9).len, 0)
+    test.assert_eq(bbqueue.grant(q, 8).len, 8)
+
+@test
+fn test_commit_may_be_shorter_than_the_grant()
+    // The two-step is the point: reserve what a frame might need,
+    // commit what it turned out to be, and the difference comes back.
+    var q = bbqueue.queue(64)
+    let g = bbqueue.grant(q, 16)
+    test.assert_eq(g.len, 16)
+    q = bbqueue.commit(q, g, 5)
+    test.assert_eq(bbqueue.len(q), 5)
+    // The eleven bytes not committed are free again.
+    test.assert_eq(bbqueue.grant_max(q).len, 64 - 5)
+
+@test
+fn test_the_frame_is_written_in_place_and_read_in_place()
+    // No copy in, no copy out — the assertion the whole grant model
+    // exists for.  The producer writes at the index it was given and
+    // the consumer reads at the index it was given, and the queue never
+    // sees a byte.
+    var buf = bytes.zeros(64)
+    var q = bbqueue.queue(64)
+
+    let w = bbqueue.grant(q, 4)
+    buf = write_at(buf, w.at, 4, 0xAB)
+    q = bbqueue.commit(q, w, 4)
+
+    let r = bbqueue.read(q)
+    test.assert_eq(r.len, 4)
+    test.assert_eq(bytes.byte_at(buf, r.at) ?? 0, 0xAB)
+    test.assert_eq(bytes.byte_at(buf, r.at + 3) ?? 0, 0xAB)
+    q = bbqueue.release(q, r, 4)
+    test.assert_true(bbqueue.is_empty(q), "the queue drains to empty")
+
+@test
+fn test_a_reader_may_release_less_than_it_was_granted()
+    // One grant can hold three frames; a consumer that decoded one
+    // releases one frame's worth and comes back for the rest.
+    var q = bbqueue.queue(64)
+    let w = bbqueue.grant(q, 12)
+    q = bbqueue.commit(q, w, 12)
+
+    let r = bbqueue.read(q)
+    test.assert_eq(r.len, 12)
+    q = bbqueue.release(q, r, 4)
+    test.assert_eq(bbqueue.len(q), 8)
+
+    let r2 = bbqueue.read(q)
+    test.assert_eq(r2.at, r.at + 4)
+    test.assert_eq(r2.len, 8)
+
+@test
+fn test_the_wrap_is_a_watermark_and_never_a_split_grant()
+    // The load-bearing case.  A 16-byte buffer with 12 bytes written
+    // and 8 released has 4 bytes at the tail and 8 at the front.  A ring
+    // buffer would hand the producer a 4-byte piece and a 8-byte piece;
+    // this hands it one run of 8 at the front and records where the
+    // written region ended.
+    var q = bbqueue.queue(16)
+    let w = bbqueue.commit(q, bbqueue.grant(q, 12), 12)
+    q = w
+    q = bbqueue.release(q, bbqueue.read(q), 8)
+
+    // Four bytes at the tail, eight at the front: the largest
+    // CONTIGUOUS run is the eight, not the twelve free bytes.
+    let g = bbqueue.grant(q, 8)
+    test.assert_eq(g.at, 0)
+    test.assert_eq(g.len, 8)
+
+    q = bbqueue.commit(q, g, 8)
+    test.assert_true(bbqueue.is_inverted(q), "the producer has wrapped past the reader")
+    // The watermark is where the tail run ended.
+    test.assert_eq(bbqueue.watermark(q), 12)
+    // Twelve bytes are readable in total: four at the tail, eight at
+    // the front.
+    test.assert_eq(bbqueue.len(q), 12)
+
+@test
+fn test_a_reader_never_sees_a_run_that_spans_the_wrap()
+    // The consequence of the watermark, and the reason a caller of this
+    // package never handles a frame in two pieces: the first read stops
+    // at the watermark, the second starts at the front.
+    var q = bbqueue.queue(16)
+    q = bbqueue.commit(q, bbqueue.grant(q, 12), 12)
+    q = bbqueue.release(q, bbqueue.read(q), 8)
+    q = bbqueue.commit(q, bbqueue.grant(q, 8), 8)
+
+    let first = bbqueue.read(q)
+    test.assert_eq(first.at, 8)
+    test.assert_eq(first.len, 4)
+    q = bbqueue.release(q, first, 4)
+
+    // Releasing to the watermark clears the inversion.
+    test.assert_false(bbqueue.is_inverted(q), "the reader has caught up past the wrap")
+    let second = bbqueue.read(q)
+    test.assert_eq(second.at, 0)
+    test.assert_eq(second.len, 8)
+
+@test
+fn test_a_queue_can_be_full_with_bytes_free()
+    // The cost of the contiguity guarantee, stated as an assertion so
+    // that nobody has to discover it: a 16-byte queue holding 12 bytes
+    // across a wrap has free space that is not one run.
+    var q = bbqueue.queue(16)
+    q = bbqueue.commit(q, bbqueue.grant(q, 12), 12)
+    q = bbqueue.release(q, bbqueue.read(q), 8)
+    q = bbqueue.commit(q, bbqueue.grant(q, 8), 8)
+    // Four free bytes, at 12..16, behind the reader.  They cannot be
+    // granted while the queue is inverted.
+    test.assert_eq(bbqueue.grant_max(q).len, 0)
+    test.assert_true(bbqueue.is_full(q), "no contiguous run is available")
+    test.assert_true(bbqueue.len(q) < bbqueue.capacity(q),
+                     "and yet the queue is not holding a full buffer")
+
+@test
+fn test_a_grant_of_zero_is_backpressure_and_not_a_failure()
+    // There is no error value in this package and this is why: a
+    // producer ahead of its consumer is the normal state of a log
+    // queue, and `len == 0` is the whole of what a caller has to check.
+    let q = bbqueue.queue(4)
+    let full = bbqueue.commit(q, bbqueue.grant(q, 4), 4)
+    let g = bbqueue.grant(full, 1)
+    test.assert_eq(g.len, 0)
+    test.assert_true(bbqueue.is_full(full), "a committed buffer grants nothing")
+
+@test
+fn test_reading_an_empty_queue_answers_a_zero_length_grant()
+    let q = bbqueue.queue(64)
+    let r = bbqueue.read(q)
+    test.assert_eq(r.len, 0)
+    // Releasing nothing is a no-op rather than a fault, so a drain loop
+    // needs no special case for its last turn.
+    let q2 = bbqueue.release(q, r, 0)
+    test.assert_eq(bbqueue.len(q2), 0)
+
+@test
+fn test_commit_moves_only_the_producer_s_fields()
+    // The claim the SPSC safety rests on, checked rather than asserted
+    // in prose: a commit never touches `read_at`, so a consumer holding
+    // its own copy of the queue value loses nothing by not seeing one.
+    var q = bbqueue.queue(64)
+    q = bbqueue.commit(q, bbqueue.grant(q, 8), 8)
+    let before = bbqueue.read(q)
+    q = bbqueue.commit(q, bbqueue.grant(q, 8), 8)
+    let after = bbqueue.read(q)
+    // The read position did not move; only the length grew.
+    test.assert_eq(after.at, before.at)
+    test.assert_eq(after.len, before.len + 8)
+
+@test
+fn test_release_moves_only_the_consumer_s_fields()
+    // The mirror of the above.  A release never touches `write_at`, so
+    // a producer holding its own copy grants from the same place.
+    var q = bbqueue.queue(64)
+    q = bbqueue.commit(q, bbqueue.grant(q, 8), 8)
+    let before = bbqueue.grant(q, 4)
+    q = bbqueue.release(q, bbqueue.read(q), 8)
+    let after = bbqueue.grant(q, 4)
+    test.assert_eq(after.at, before.at)
