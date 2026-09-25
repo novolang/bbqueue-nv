@@ -4,6 +4,16 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.0.3 — 2026-09-25
+
+One test helper changed for novo 0.10.0, where a `Bytes` buffer is
+written in place.  The helper that fills a granted region took the
+buffer as a plain parameter and wrote through a second name for it.
+Under 0.10.0 that write reaches the caller's buffer, and the compiler
+cannot see it.  The helper now takes the buffer as a `var` parameter
+and writes into it directly, which is what the in-place test means.  No
+change to the interface.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

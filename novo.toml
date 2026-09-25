@@ -1,6 +1,6 @@
 [package]
 name        = "bbqueue-nv"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "A single-producer single-consumer byte queue whose unit of work is a contiguous grant: the producer is told where N bytes are, writes the frame in place, and commits what it turned out to be.  The wrap is a watermark, so no caller ever handles a frame in two pieces.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 

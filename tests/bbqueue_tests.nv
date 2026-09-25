@@ -17,12 +17,10 @@ use std.bytes
 use bbqueue
 
 // Fill `used` bytes of `buf` at `at` with `fill`, the way a producer
-// with a frame in hand would.
-fn write_at(buf: Bytes, at: Int, used: Int, fill: Int) -> Bytes
-    var b = buf
+// with a frame in hand would.  The bytes land in the caller's buffer.
+fn write_at(var buf: Bytes, at: Int, used: Int, fill: Int)
     for i in 0..used
-        b = bytes.set_u8(b, at + i, fill)
-    b
+        bytes.set_u8(buf, at + i, fill)
 
 @test
 fn test_a_fresh_queue_is_empty_and_grants_the_whole_buffer()
@@ -79,7 +77,7 @@ fn test_the_frame_is_written_in_place_and_read_in_place()
     var q = bbqueue.queue(64)
 
     let w = bbqueue.grant(q, 4)
-    buf = write_at(buf, w.at, 4, 0xAB)
+    write_at(buf, w.at, 4, 0xAB)
     q = bbqueue.commit(q, w, 4)
 
     let r = bbqueue.read(q)
