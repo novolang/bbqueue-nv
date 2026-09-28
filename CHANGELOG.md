@@ -4,6 +4,21 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.0.4 — 2026-09-29
+
+README only; no change to the interface.
+
+- "What is not included" no longer says a queue that owned its bytes
+  would copy them on every write.  Since the language's `var self`
+  methods (SPEC section 14.7) that is no longer so.  The storage stays
+  with the caller because a grant is written in place by an interrupt
+  handler or a DMA engine.
+- "Related packages" points at the language's `Vec[T; N]`,
+  `Deque[T; N]`, `String[N]` and `Map[K, V; N]` (SPEC section 14.8) for
+  a bounded collection, where it pointed at heapless-nv, which is
+  withdrawn.  This queue stays for what the family does not do: a
+  contiguous grant that never splits a frame.
+
 ## 0.0.3 — 2026-09-25
 
 One test helper changed for novo 0.10.0, where a `Bytes` buffer is

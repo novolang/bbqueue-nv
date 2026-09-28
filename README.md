@@ -191,10 +191,10 @@ every function it calls is a `todo()` that would panic on the first line.
 
 ## What is not included
 
-- **The buffer.** A `@value` struct is built whole and replaced whole
-  (SPEC section 14.3), so a queue that owned its bytes would copy the whole
-  buffer on every byte written. The storage stays with the caller, which is
-  also what lets one queue serve a host and a device.
+- **The buffer.** The storage stays with the caller. A grant is written in
+  place by an interrupt handler or a DMA engine, so the bytes live where that
+  writer can address them, which is also what lets one queue serve a host and
+  a device.
 - **A lock, an atomic or a critical section.** Every function is a total
   function from values to values, so there is nothing in this package to
   protect. What two contexts share is the cell they keep the queue value in,
@@ -209,12 +209,12 @@ every function it calls is a `todo()` that would panic on the first line.
 
 ## Related packages
 
-- [heapless-nv](https://novo-lang.org/packages/heapless-nv) is the other
-  container package for a device with no allocator: a bounded vector, a
-  bounded string, a bounded FIFO and a bounded map. Its FIFO moves elements
-  by value, one at a time. This queue moves bytes by position, a run at a
-  time, and is the one to use when the producer already has the frame
-  written somewhere.
+- The language's fixed-capacity family, `Vec[T; N]`, `Deque[T; N]`,
+  `String[N]` and `Map[K, V; N]` (SPEC section 14.8), is the way to hold a
+  bounded collection on a device with no allocator. A `Deque[u8; N]` moves
+  one byte at a time and splits a frame at the wrap. This queue moves bytes
+  by position, a run at a time, never splits a frame, and is the one to use
+  when the producer already has the frame written somewhere.
 - [rzcobs-nv](https://novo-lang.org/packages/rzcobs-nv),
   [cobs-nv](https://novo-lang.org/packages/cobs-nv) and
   [frame-nv](https://novo-lang.org/packages/frame-nv) mark where one frame
