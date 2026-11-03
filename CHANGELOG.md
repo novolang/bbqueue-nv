@@ -37,6 +37,8 @@ one at the front.  Each panic is raised from a helper that builds its
 own queue, because a lambda cannot capture a `@value` binding
 (SPEC § 14.5).
 
+This release requires novo 0.23.0 or later.
+
 ## 0.0.4 — 2026-09-29
 
 README only; no change to the interface.

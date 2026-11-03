@@ -20,7 +20,7 @@ category    = "embedded"
 tags        = ["bbqueue", "spsc", "queue", "grant", "ring", "defmt", "deferred-logging", "interrupt", "embedded", "sans-io"]
 repository  = "https://github.com/novolang/bbqueue-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.20.2"
+novo        = ">= 0.23.0"
 
 [docs.pages]
 "README.md" = "Handing an interrupt a place to write, rather than a byte to push"
