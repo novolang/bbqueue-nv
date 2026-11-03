@@ -1,0 +1,93 @@
+// bbqueue_edge_tests.nv — the cases the API suite walks past.
+//
+// A caller that hands back more bytes than it was granted, which
+// `commit` and `release` answer with a panic rather than a value.  A
+// producer that asked for room at the front of the buffer and then
+// wrote nothing, which is the commit of zero bytes that has already
+// moved the wrap.  And `grant_max` in the one state the API suite never
+// asks it about: a queue whose larger free run is the one at the front.
+
+use std.test
+use bbqueue
+
+// ── More bytes than the grant holds ──────────────────────────────────
+
+// Commit one byte past the grant, over a queue built here.
+//
+// The queue is built inside each helper rather than passed in because a
+// lambda cannot capture a `@value` binding: the closure would hold a
+// pointer into stack storage that dies with the frame (SPEC § 14.5).
+fn over_commit()
+    let q = bbqueue.queue(64)
+    let g = bbqueue.grant(q, 8)
+    let _ = bbqueue.commit(q, g, 9)
+
+// Release one byte past the grant.
+fn over_release()
+    let q = bbqueue.queue(64)
+    let g = bbqueue.grant(q, 8)
+    let _ = bbqueue.release(q, g, 9)
+
+@test
+fn test_committing_more_than_the_grant_panics()
+    var q = bbqueue.queue(64)
+    let g = bbqueue.grant(q, 8)
+    // The grant itself commits, so the panic the assertion observes is
+    // the length and not the call.
+    q = bbqueue.commit(q, g, 8)
+    test.assert_eq(bbqueue.len(q), 8)
+    test.assert_raises(() => over_commit())
+
+@test
+fn test_releasing_more_than_the_grant_panics()
+    var q = bbqueue.queue(64)
+    let g = bbqueue.grant(q, 8)
+    q = bbqueue.commit(q, g, 8)
+    // Releasing the whole grant is the ordinary call.
+    q = bbqueue.release(q, bbqueue.read(q), 8)
+    test.assert_true(bbqueue.is_empty(q), "the release drained the queue")
+    test.assert_raises(() => over_release())
+
+// ── The wrap ─────────────────────────────────────────────────────────
+
+@test
+fn test_a_producer_that_writes_nothing_leaves_the_queue_as_it_was()
+    // Rule 4: a producer may be interrupted between the grant and the
+    // commit and may decide to write nothing at all.  The grant here is
+    // the one taken from the front, so this is the commit of zero that
+    // has already moved the wrap.
+    var q = bbqueue.queue(16)
+    q = bbqueue.commit(q, bbqueue.grant(q, 12), 12)
+    q = bbqueue.release(q, bbqueue.read(q), 8)
+    let before = bbqueue.len(q)
+
+    let g = bbqueue.grant(q, 8)
+    test.assert_eq(g.at, 0)
+    q = bbqueue.commit(q, g, 0)
+
+    test.assert_eq(bbqueue.len(q), before)
+    test.assert_true(bbqueue.is_inverted(q), "the wrap was recorded even so")
+    let r = bbqueue.read(q)
+    test.assert_eq(r.at, 8)
+    test.assert_eq(r.len, 4)
+
+    // The reader catches up exactly as it would have, and the front run
+    // that was reserved and never written is free again.
+    q = bbqueue.release(q, r, 4)
+    test.assert_true(bbqueue.is_empty(q), "nothing was written, so the drain empties it")
+    test.assert_false(bbqueue.is_inverted(q), "the wrap cleared with the drain")
+    test.assert_eq(bbqueue.grant_max(q).len, 16)
+
+@test
+fn test_grant_max_answers_the_front_run_when_it_is_the_larger()
+    // Twelve bytes written and eight released leaves four at the tail
+    // and eight at the front.  A producer with a frame of unknown
+    // length gets the run that holds more, which is the one at the
+    // front.
+    var q = bbqueue.queue(16)
+    q = bbqueue.commit(q, bbqueue.grant(q, 12), 12)
+    q = bbqueue.release(q, bbqueue.read(q), 8)
+
+    let g = bbqueue.grant_max(q)
+    test.assert_eq(g.at, 0)
+    test.assert_eq(g.len, 8)

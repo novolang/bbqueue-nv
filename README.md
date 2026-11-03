@@ -9,11 +9,6 @@ implements the bip-buffer described in
 [The Bip Buffer](https://www.codeproject.com/Articles/3479/The-Bip-Buffer-The-Circular-Buffer-with-a-Twist)
 by Simon Cooke.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared with
-its full signature, but every body is a `todo()` that panics when called. The
-package is published so its design can be reviewed and depended on before it
-is implemented. Version 0.1.0 will be the first working release.
-
 ## What a grant is
 
 An ordinary queue is written one element at a time. The producer hands a byte
@@ -100,9 +95,7 @@ fn main() [io]
 ```
 
 Build and test with `novo pkg build` and
-`novo test --isolate tests/bbqueue_tests.nv`. Today `novo test` fails on
-purpose: every test reaches a `not implemented: bbqueue.<fn>` panic. The
-tests are the specification the implementation will have to satisfy.
+`novo test --isolate tests/bbqueue_tests.nv`.
 
 ## What the package contains
 
@@ -186,8 +179,9 @@ novo build --target=nrf52-qemu tests/embedded_probe.nv
 ```
 
 That command was run against this release. It produces a Cortex-M4
-executable, `embedded_probe.elf`. The probe builds; it is not run, because
-every function it calls is a `todo()` that would panic on the first line.
+executable, `embedded_probe.elf`. The probe is built and not run: the build
+is the check, and a list literal, a `Str` concatenation, a `Bytes` call or an
+unbounded `while` anywhere in the modules it reaches would fail it.
 
 ## What is not included
 
@@ -230,7 +224,8 @@ every function it calls is a `todo()` that would panic on the first line.
 ## Tests
 
 ```bash
-novo test --isolate tests/bbqueue_tests.nv   # 13 tests
+novo test --isolate tests/bbqueue_tests.nv         # 13 tests
+novo test --isolate tests/bbqueue_edge_tests.nv    # 4 tests
 ```
 
 The oracle is the upstream `bbqueue` test suite, which covers the wrap, the
@@ -238,7 +233,7 @@ watermark, the split-free read and the full-with-bytes-free case. The tests
 here hold the buffer as a real `Bytes` and write into it at the index the
 queue answers, so each one reads as a caller rather than as index arithmetic.
 
-The suite asserts that a fresh queue grants its whole buffer, that asking
+The API suite asserts that a fresh queue grants its whole buffer, that asking
 does not reserve, that a grant is contiguous or nothing, that a commit may be
 shorter than its grant, that a frame written in place is read in place, that a
 reader may release less than it was granted, that the wrap is a watermark and
@@ -247,21 +242,10 @@ queue can be full with bytes free, that a zero-length grant is backpressure
 rather than a failure, that reading an empty queue answers a zero-length
 grant, and that `commit` and `release` each move only their own side's fields.
 
-The tests compile today and fail at run, each on the
-`not implemented: bbqueue.<fn>` panic that is its body. That is the expected
-state of an interface release. They turn green one at a time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `bbqueue.BbQueue`, `.BbGrant` | declared |
-| `bbqueue.queue` | no |
-| `bbqueue.grant`, `.grant_max` | no |
-| `bbqueue.commit` | no |
-| `bbqueue.read`, `.release` | no |
-| `bbqueue.len`, `.capacity`, `.is_empty`, `.is_full` | no |
-| `bbqueue.watermark`, `.is_inverted` | no |
+The edge suite covers what that one leaves: the panic a `used` above the grant
+gets from `commit` and from `release`, a grant taken from the front and
+committed with nothing written, and `grant_max` answering the run at the front
+when it is the larger of the two.
 
 ## Licence
 

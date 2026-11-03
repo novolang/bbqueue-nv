@@ -1,12 +1,6 @@
 // tests/bbqueue_tests.nv — the API tests, written against the
 // signatures.
 //
-// They COMPILE today and they FAIL at run, with `not implemented:
-// bbqueue.<fn>` from the `todo()` that is each body.  That is the
-// expected state of an interface release: the compiler has checked
-// every signature, every type and every effect row, and nothing else
-// has been checked because there is nothing else yet.
-//
 // The buffer is a real `Bytes` here, so that the tests read like a
 // caller rather than like index arithmetic: the queue answers where to
 // write, and the test writes there.  That is the whole contract, and

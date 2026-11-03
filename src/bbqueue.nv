@@ -1,9 +1,6 @@
 // bbqueue — a single-producer single-consumer byte queue whose unit of
 // work is a CONTIGUOUS GRANT rather than a byte.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT A GRANT IS.  The producer asks for N contiguous bytes, is told
 // where they are, writes them where they are, and then commits M of the
 // N.  The consumer is told where the readable bytes are, reads them
@@ -82,6 +79,34 @@ struct BbGrant
     at: Int
     len: Int
 
+// ── The room a grant comes from ──────────────────────────────────────
+
+// How many contiguous bytes are free where the producer's next grant
+// begins.
+//
+// Before the wrap that is the rest of the buffer.  After it the
+// producer is writing at the front of the buffer, so its run ends where
+// the reader has got to rather than at the capacity.
+fn tail_room(q: BbQueue) -> Int
+    if q.inverted
+        q.read_at - q.write_at
+    else
+        q.cap - q.write_at
+
+// How many contiguous bytes are free at the front of the buffer, which
+// is where a grant goes when the tail is too short for it.
+//
+// Zero once the queue is inverted, because the front is then written
+// bytes and not free space.  That is what lets a queue be full while
+// bytes are free: those bytes are behind the reader, and the only run a
+// grant can come from is the one the producer is standing in.  Before
+// the wrap the front is exactly what the reader has released.
+fn front_room(q: BbQueue) -> Int
+    if q.inverted
+        0
+    else
+        q.read_at
+
 // A fresh queue over a caller's buffer of `cap` bytes.
 //
 // The buffer is not passed and not touched.  `cap` is the caller's
@@ -97,7 +122,7 @@ struct BbGrant
 //     println("${bbqueue.capacity(q)} ${bbqueue.len(q)}")   // 256 0
 // ```
 pub fn queue(cap: Int) -> BbQueue
-    todo("bbqueue.queue")
+    BbQueue { cap: cap, write_at: 0, read_at: 0, watermark: cap, inverted: false }
 
 // Ask for `want` contiguous bytes, and answer where they are.
 //
@@ -121,7 +146,12 @@ pub fn queue(cap: Int) -> BbQueue
 //     println("${g.at} ${g.len}")   // 0 8
 // ```
 pub fn grant(q: BbQueue, want: Int) -> BbGrant
-    todo("bbqueue.grant")
+    if want <= tail_room(q)
+        BbGrant { at: q.write_at, len: want }
+    elif want <= front_room(q)
+        BbGrant { at: 0, len: want }
+    else
+        BbGrant { at: 0, len: 0 }
 
 // The largest contiguous grant available, which may be 0.
 //
@@ -137,7 +167,12 @@ pub fn grant(q: BbQueue, want: Int) -> BbGrant
 //     println("${bbqueue.grant_max(q).len}")   // 64
 // ```
 pub fn grant_max(q: BbQueue) -> BbGrant
-    todo("bbqueue.grant_max")
+    let tail = tail_room(q)
+    let front = front_room(q)
+    if tail >= front
+        BbGrant { at: q.write_at, len: tail }
+    else
+        BbGrant { at: 0, len: front }
 
 // Make the first `used` bytes of `g` visible to the consumer, and
 // answer the queue after it.
@@ -165,7 +200,18 @@ pub fn grant_max(q: BbQueue) -> BbGrant
 //     println("${bbqueue.len(q)}")   // 5
 // ```
 pub fn commit(q: BbQueue, g: BbGrant, used: Int) -> BbQueue
-    todo("bbqueue.commit")
+    if used > g.len
+        panic.panic("bbqueue.commit: used is above the grant")
+    // A grant at 0 is the wrap only when the buffer already held bytes.
+    // On an empty queue the run at 0 is the tail run, and reading the
+    // two the same way would set a watermark of 0 and hide the commit
+    // from `read`.
+    if not q.inverted and g.at == 0 and q.write_at > 0
+        BbQueue { cap: q.cap, write_at: used, read_at: q.read_at,
+            watermark: q.write_at, inverted: true }
+    else
+        BbQueue { cap: q.cap, write_at: g.at + used, read_at: q.read_at,
+            watermark: q.watermark, inverted: q.inverted }
 
 // The contiguous bytes waiting to be read, which may be none.
 //
@@ -185,7 +231,10 @@ pub fn commit(q: BbQueue, g: BbGrant, used: Int) -> BbQueue
 //     println("${r.at} ${r.len}")   // 0 8
 // ```
 pub fn read(q: BbQueue) -> BbGrant
-    todo("bbqueue.read")
+    if q.inverted
+        BbGrant { at: q.read_at, len: q.watermark - q.read_at }
+    else
+        BbGrant { at: q.read_at, len: q.write_at - q.read_at }
 
 // Give the first `used` bytes of `g` back to the producer, and answer
 // the queue after it.
@@ -211,7 +260,15 @@ pub fn read(q: BbQueue) -> BbGrant
 //     println("${bbqueue.len(q)}")   // 0
 // ```
 pub fn release(q: BbQueue, g: BbGrant, used: Int) -> BbQueue
-    todo("bbqueue.release")
+    if used > g.len
+        panic.panic("bbqueue.release: used is above the grant")
+    let next_read = g.at + used
+    if q.inverted and next_read == q.watermark
+        BbQueue { cap: q.cap, write_at: q.write_at, read_at: 0,
+            watermark: q.cap, inverted: false }
+    else
+        BbQueue { cap: q.cap, write_at: q.write_at, read_at: next_read,
+            watermark: q.watermark, inverted: q.inverted }
 
 // How many bytes are committed and not yet released, across the wrap.
 //
@@ -220,15 +277,18 @@ pub fn release(q: BbQueue, g: BbGrant, used: Int) -> BbQueue
 // of the first of them from `read`.  A caller watching for backpressure
 // wants this one; a caller about to read wants `read`.
 pub fn len(q: BbQueue) -> Int
-    todo("bbqueue.len")
+    if q.inverted
+        q.watermark - q.read_at + q.write_at
+    else
+        q.write_at - q.read_at
 
 // The buffer size the queue was made for.
 pub fn capacity(q: BbQueue) -> Int
-    todo("bbqueue.capacity")
+    q.cap
 
 // True when nothing is committed and unreleased.
 pub fn is_empty(q: BbQueue) -> Bool
-    todo("bbqueue.is_empty")
+    len(q) == 0
 
 // True when no grant of any size can be given.
 //
@@ -237,7 +297,7 @@ pub fn is_empty(q: BbQueue) -> Bool
 // contiguous run.  That is the cost of the guarantee, and it is why
 // this is a function rather than `len(q) == capacity(q)`.
 pub fn is_full(q: BbQueue) -> Bool
-    todo("bbqueue.is_full")
+    grant_max(q).len == 0
 
 // Where the written region ends when the queue is inverted, and the
 // capacity when it is not.
@@ -246,7 +306,7 @@ pub fn is_full(q: BbQueue) -> Bool
 // because the field is the one part of this design a reader is most
 // likely to want to check against the reference implementation.
 pub fn watermark(q: BbQueue) -> Int
-    todo("bbqueue.watermark")
+    q.watermark
 
 // True when the producer has wrapped past the consumer.
 //
@@ -254,4 +314,4 @@ pub fn watermark(q: BbQueue) -> Int
 // consult it — `read` and `grant` already account for it — and it is
 // published for the same reason `watermark` is.
 pub fn is_inverted(q: BbQueue) -> Bool
-    todo("bbqueue.is_inverted")
+    q.inverted
